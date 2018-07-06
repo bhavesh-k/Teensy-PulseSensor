@@ -4,16 +4,16 @@
 volatile long prevMs[3] = { 0 };
 volatile long currentMs[3] = { 0 };
 
-const int sensorPins[3] = {22, 18, 14};
+const int sensorPins[3] = {22, 15, 14};
 const int ledPins[3] = {3, 6, 9};
 int thresh[3] = { 0 }; // pulse detect threshold initial value
 int drop[3] = { 0 }; // pulse drop thresh initial value
 bool trig[3] = {false, false, false}; // used to track whether pulse has crossed thresh (for Schmitt triggering purposes)
 int pulses[3] = { 0 }; // count number of pulses detected on each sensor
-float BPM[3] = { 0 }; // BPM from each sensor
-const int noiseFloor = 420; // approx. lowest ADC value during noise measurement
+const int noiseFloor = 0; // approx. lowest ADC value during noise measurement
 const int BUFSZ = 100; // circular buffer size for moving average
-const int CUMBUFSZ = 4000; // circular buffer size for long term trending
+const int CUMBUFSZ = 2000; // circular buffer size for long term trending
+const int BPMBUF = 4; // // circular buffer size for BPM avg
 
 int adcVal[3] = { 0 }; // current ADC val for each pulse sensor
 int maxVal[3] = { 0 }; // max ADC val from last CUMBUFSZ samples for each sensor
@@ -27,6 +27,10 @@ CircularBuffer<int,BUFSZ> adcStore[3] = { }; // store latest BUFSZ ADC values fo
 CircularBuffer<int,CUMBUFSZ> adcCumStore[3] = { }; // store CUMBUFSZ ADC values for each sensor for long term trending
 bool bufReady = false; // wait until buffer is full before doing moving avg and max on it
 int serialCount = 0; // only write data to serial output 1 in N times, using this counter
+
+CircularBuffer<int, BPMBUF> timeDiffs[3] = { }; // store latest 5 time differences
+float avgBPM[3] = { 0 };  // calculated BPM from each sensor
+bool bpmReady[3] = {false, false, false}; // indicates whether BPM estimate is ready for each sensor
 
 void setup() {
   // put your setup code here, to run once:
@@ -42,10 +46,12 @@ void setup() {
 
 void loop() {
 
+  delay(1);
+
   // read all 3 pulse sensors
   for(int i = 0; i < 3; ++i)
   {
-    adcVal[i] = max(analogRead(sensorPins[i]) - noiseFloor, 0);
+    adcVal[i] = analogRead(sensorPins[i]);
     if(bufReady)
     {
       avgs[i] += (adcVal[i]/float(BUFSZ)) - (adcStore[i].last()/float(BUFSZ));
@@ -88,10 +94,12 @@ void loop() {
   }
 
   // write only 1 in 1000 measurements to serial output
-  if(serialCount == 1000)
+  if(serialCount == 10)
   {
     #ifdef UseSerial
-      Serial.printf("%f,%f,%f\n", BPM[0], BPM[1], BPM[2]);
+        Serial.printf("%.02f,%.02f,%.02f\n", avgBPM[0],avgBPM[1],avgBPM[2]);
+//      Serial.printf("%.02f,%.d,%d,%d,%d\n", avgs[1],maxVal[1],minVal[1],thresh[1],drop[1]);
+//      Serial.printf("%.02f,%.02f,%.02f\n", avgs[0],avgs[1],avgs[2]);
     #endif
     serialCount = 0;
     if(!bufReady)
@@ -130,28 +138,54 @@ void loop() {
   // blink relevant LEDs with the person's pulse
   for(int i = 0; i < 3; ++i)
   {
-    thresh[i] = int(0.8 * maxVal[i]);
+    thresh[i] = int(0.7 * range[i] + minVal[i]);
     if(avgs[i] > thresh[i])
     {
-      if((maxVal[i] > 160) && (range[i] > 60))
+      if(range[i] > 100)
       {
         if(!trig[i])
+        {
           trig[i] = true;
-        digitalWrite(ledPins[i], HIGH);
+          pulses[i]++;
+          prevMs[i] = currentMs[i];
+          currentMs[i] = millis();
+
+          // if more than 2 seconds have passed since a peak, assume that
+          // the person has left and reset the BPM estimation
+          long timePassed = currentMs[i] - prevMs[i];
+          if(timePassed > 2000)
+          {
+            bpmReady[i] = false;
+            avgBPM[i] = 0;
+            timeDiffs[i].clear();
+          }
+          // otherwise calculate the BPM
+          else
+          {
+            timeDiffs[i].unshift(float(timePassed));
+            if(timeDiffs[i].isFull())
+            {
+              bpmReady[i] = true;
+              int total = 0;
+              for(int j =  0; j < BPMBUF; j++)
+              {
+                total += timeDiffs[i][j];
+              }
+              avgBPM[i] = 60000.0 / (total / float(BPMBUF));
+              digitalWrite(ledPins[i], HIGH);
+            }
+          }
+        }
       }
     }
     else
     {
       if(trig[i])
       {
-        drop[i] = int(0.3 * (maxVal[i] - minVal[i]));
-        if((avgs[i] - minVal[i]) < drop[i])
+        drop[i] = int(minVal[i] + 0.3 * range[i]);
+        if(avgs[i] < drop[i])
         {
           trig[i] = false;
-          pulses[i]++;
-          prevMs[i] = currentMs[i];
-          currentMs[i] = millis();
-          BPM[i] = 60000.0 / (float(currentMs[i] - prevMs[i]));
         }
       }
       digitalWrite(ledPins[i], LOW);
