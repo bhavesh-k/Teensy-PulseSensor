@@ -3,17 +3,20 @@
 
 volatile long prevMs[3] = { 0 };
 volatile long currentMs[3] = { 0 };
-
-const int sensorPins[3] = {22, 15, 14};
-const int ledPins[3] = {3, 6, 9};
+const int sensorPins[3] = {16, 19, 14};
+const int ledPins[3][3] = {
+                           {23, 22, 21}, // RGB of LED 1
+                           {3,4,5}, // LED 2
+                           {6,9,10} // LED 3
+                           };
 int thresh[3] = { 0 }; // pulse detect threshold initial value
 int drop[3] = { 0 }; // pulse drop thresh initial value
 bool trig[3] = {false, false, false}; // used to track whether pulse has crossed thresh (for Schmitt triggering purposes)
 int pulses[3] = { 0 }; // count number of pulses detected on each sensor
 const int noiseFloor = 0; // approx. lowest ADC value during noise measurement
 const int BUFSZ = 100; // circular buffer size for moving average
-const int CUMBUFSZ = 2000; // circular buffer size for long term trending
-const int BPMBUF = 4; // // circular buffer size for BPM avg
+const int CUMBUFSZ = 1000; // circular buffer size for long term trending
+const int BPMBUF = 5; // // circular buffer size for BPM avg
 
 int adcVal[3] = { 0 }; // current ADC val for each pulse sensor
 int maxVal[3] = { 0 }; // max ADC val from last CUMBUFSZ samples for each sensor
@@ -29,7 +32,7 @@ bool bufReady = false; // wait until buffer is full before doing moving avg and 
 int serialCount = 0; // only write data to serial output 1 in N times, using this counter
 
 CircularBuffer<int, BPMBUF> timeDiffs[3] = { }; // store latest 5 time differences
-float avgBPM[3] = { 0 };  // calculated BPM from each sensor
+int avgBPM[3] = {80, 80, 80};  // calculated BPM from each sensor
 bool bpmReady[3] = {false, false, false}; // indicates whether BPM estimate is ready for each sensor
 
 void setup() {
@@ -40,7 +43,10 @@ void setup() {
   
   for(int i = 0; i < 3; ++i)
   {
-    pinMode(ledPins[i], OUTPUT);
+    for(int j = 0; j < 3; ++j)
+    {
+      pinMode(ledPins[i][j], OUTPUT);
+    }
   }
 }
 
@@ -97,7 +103,7 @@ void loop() {
   if(serialCount == 10)
   {
     #ifdef UseSerial
-        Serial.printf("%.02f,%.02f,%.02f\n", avgBPM[0],avgBPM[1],avgBPM[2]);
+        Serial.printf("%.02f,%d,%d,%d,%d\n", avgs[0],maxVal[0],minVal[0],thresh[0],drop[0]);
 //      Serial.printf("%.02f,%.d,%d,%d,%d\n", avgs[1],maxVal[1],minVal[1],thresh[1],drop[1]);
 //      Serial.printf("%.02f,%.02f,%.02f\n", avgs[0],avgs[1],avgs[2]);
     #endif
@@ -138,10 +144,10 @@ void loop() {
   // blink relevant LEDs with the person's pulse
   for(int i = 0; i < 3; ++i)
   {
-    thresh[i] = int(0.7 * range[i] + minVal[i]);
+    thresh[i] = int(0.52 * range[i] + minVal[i]);
     if(avgs[i] > thresh[i])
     {
-      if(range[i] > 100)
+      if(range[i] > 0)
       {
         if(!trig[i])
         {
@@ -157,7 +163,11 @@ void loop() {
           {
             bpmReady[i] = false;
             avgBPM[i] = 0;
-            timeDiffs[i].clear();
+            //timeDiffs[i].clear();
+            for(int j = 0; j < 3; ++j)
+            {
+              analogWrite(ledPins[i][j], 0);
+            }
           }
           // otherwise calculate the BPM
           else
@@ -171,8 +181,58 @@ void loop() {
               {
                 total += timeDiffs[i][j];
               }
-              avgBPM[i] = 60000.0 / (total / float(BPMBUF));
-              digitalWrite(ledPins[i], HIGH);
+              avgBPM[i] = int(60000.0 / (total / float(BPMBUF)));
+
+              // and blink/PWM the LEDS
+              if(avgBPM[i] > 140)
+              {
+                // same color as BPM of 140
+                
+                // red
+                analogWrite(ledPins[i][0], 255);
+                // green
+                analogWrite(ledPins[i][1], 0);
+                // blue
+                analogWrite(ledPins[i][2], 0);
+              }
+              else if(avgBPM[i] >= 107 && avgBPM[i] <= 140)
+              {
+                // red
+                analogWrite(ledPins[i][0], int((255.0/33)*(avgBPM[i] - 107)));
+                // green
+                analogWrite(ledPins[i][1], 255 - int((255.0/33)*(avgBPM[i] - 107)));
+                // blue
+                analogWrite(ledPins[i][2], 0);
+              }
+              else if(avgBPM[i] >= 74)
+              {
+                // red
+                analogWrite(ledPins[i][0], 0);
+                // green
+                analogWrite(ledPins[i][1], int((255.0/33)*(avgBPM[i] - 74)));
+                // blue
+                analogWrite(ledPins[i][2], 255 - int((255.0/33)*(avgBPM[i] - 74)));
+              }
+              else if(avgBPM[i] >= 41)
+              {
+                // red
+                analogWrite(ledPins[i][0], 200 - int((200.0/33)*(avgBPM[i] - 41)));
+                // green
+                analogWrite(ledPins[i][1], 0);
+                // blue
+                analogWrite(ledPins[i][2], 55 + int((200.0/33)*(avgBPM[i] - 41)));
+              }
+              else
+              {
+                // same colour as BPM of 41
+
+                // red
+                analogWrite(ledPins[i][0], 200);
+                // green
+                analogWrite(ledPins[i][1], 0);
+                // blue
+                analogWrite(ledPins[i][2], 55);
+              }
             }
           }
         }
@@ -188,7 +248,10 @@ void loop() {
           trig[i] = false;
         }
       }
-      digitalWrite(ledPins[i], LOW);
+      for(int j = 0; j < 3; ++j)
+      {
+        analogWrite(ledPins[i][j], LOW);
+      }
     }
 
   }
